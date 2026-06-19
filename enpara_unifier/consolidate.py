@@ -30,6 +30,8 @@ def classify(path: str) -> str:
         head = doc[0].get_text()
     except Exception:
         head = ""
+    if "Varlık ve Borç" in head or "varlık ve borç" in low:
+        return "balance_snapshot"
     if "Kredi Kartı Ekstresi" in head or "Kart limiti" in head or "ekstreniz" in low:
         return "credit_card"
     if ("ihtiyaç kredisi özet" in head or "tüm hesaplarınız" in head
@@ -80,6 +82,8 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
 
     txns: list[Transaction] = []
     snapshots: list[dict] = []
+    balance_snaps: list[dict] = []
+    cc_files: list[str] = []
     holder = None
     counts = {}
 
@@ -89,6 +93,7 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
         name = os.path.basename(f)
         try:
             if kind == "credit_card":
+                cc_files.append(f)
                 t = P.parse_credit_card_pdf(f, ocr=ocr, cache=cache)
             elif kind == "account_pdf":
                 t = P.parse_account_pdf(f)
@@ -99,6 +104,13 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
                 holder = holder or _extract_holder(f)
             elif kind == "account_xls":
                 t = P.parse_account_xls(f)
+            elif kind == "balance_snapshot":
+                snap = P.parse_balance_snapshot(f)
+                snap["source_file"] = name
+                balance_snaps.append(snap)
+                if verbose:
+                    print(f"  ✓ [{kind:16}]      kart borç={snap.get('kredi_karti_borc')}  {name}")
+                continue
             else:
                 if verbose:
                     print(f"  ? atlandı (tanınmadı): {name}")
@@ -122,11 +134,13 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
     monthly = A.monthly_cashflow(txns)
     cats = A.category_breakdown(txns)
     recurring = A.detect_recurring(txns)
+    meta = _account_meta(txns, cc_files)
+    anchors = _balance_anchors(balance_snaps)
 
     # çıktılar
     _write_csvs(output_dir, txns, monthly, cats, recurring, snapshots)
     _write_xlsx(output_dir, txns, monthly, cats, recurring, snapshots)
-    _write_sqlite(output_dir, txns, monthly, cats, recurring, snapshots)
+    _write_sqlite(output_dir, txns, monthly, cats, recurring, snapshots, meta, anchors)
     _write_markdown(output_dir, txns, monthly, cats, recurring, snapshots,
                     holder, n_match, ocr)
 
@@ -170,6 +184,51 @@ def _write_csvs(out, txns, monthly, cats, recurring, snapshots):
                     "Kredi Tutarı", "Sonraki Taksit", "Kaynak Dosya"])
 
 
+def _account_meta(txns, cc_files):
+    """Actual'a aktarım için hesap tanımları + açılış bakiyeleri.
+    Açılış bakiyesi sayesinde Actual'daki hesap bakiyeleri Enpara'nınkiyle tutar."""
+    from .model import SOURCE_CREDIT_CARD as CC, SOURCE_ACCOUNT as ACC
+    meta = []
+
+    # Vadesiz: en erken hesap işleminden geriye -> açılış = bakiye - tutar
+    acc_tx = sorted([t for t in txns if t.source == ACC and t.balance is not None],
+                    key=lambda t: t.date)
+    acc_open = round(acc_tx[0].balance - acc_tx[0].amount, 2) if acc_tx else 0.0
+    meta.append({"kaynak": ACC, "ad": "Enpara Vadesiz TL", "tip": "checking",
+                 "acilis_bakiye": acc_open, "para_birimi": "TL"})
+
+    # Kredi kartı: en erken ekstrenin 'önceki ekstre bakiyesi' = devreden borç
+    card_open = 0.0
+    if cc_files:
+        def stmt_date(p):
+            m = re.search(r"(\d{2})[.](\d{2})[.](\d{4})", os.path.basename(p))
+            return (int(m.group(3)), int(m.group(2))) if m else (9999, 99)
+        earliest = min(cc_files, key=stmt_date)
+        prev = P.credit_card_opening(earliest)
+        if prev is not None:
+            card_open = round(-prev, 2)   # devreden borç -> negatif başlangıç
+    if any(t.source == CC for t in txns):
+        meta.append({"kaynak": CC, "ad": "Enpara Kredi Kartı", "tip": "credit",
+                     "acilis_bakiye": card_open, "para_birimi": "TL"})
+    return meta
+
+
+def _balance_anchors(balance_snaps):
+    """Varlık/Borç snapshot'larından hesap 'hedef bakiyeleri'.
+    En güncel snapshot esas alınır. Kart için hedef = -(güncel borç) — böylece
+    faturalanmamış son harcamalar tek bir uzlaştırma işlemiyle yansıtılır."""
+    from .model import SOURCE_CREDIT_CARD as CC
+    if not balance_snaps:
+        return []
+    latest = max(balance_snaps, key=lambda s: s.get("tarih") or date.min)
+    anchors = []
+    if latest.get("kredi_karti_borc") is not None:
+        anchors.append({"kaynak": CC, "tarih": latest.get("tarih"),
+                        "hedef_bakiye": round(-latest["kredi_karti_borc"], 2),
+                        "kaynak_dosya": latest.get("source_file")})
+    return anchors
+
+
 def _dedupe_snapshots(snapshots):
     best = {}
     for s in snapshots:
@@ -201,7 +260,7 @@ def _write_xlsx(out, txns, monthly, cats, recurring, snapshots):
             pd.DataFrame(snapshots).to_excel(xl, sheet_name="Bakiye-Kredi", index=False)
 
 
-def _write_sqlite(out, txns, monthly, cats, recurring, snapshots):
+def _write_sqlite(out, txns, monthly, cats, recurring, snapshots, meta=None, anchors=None):
     path = os.path.join(out, "finans.db")
     if os.path.exists(path):
         os.remove(path)
@@ -214,6 +273,14 @@ def _write_sqlite(out, txns, monthly, cats, recurring, snapshots):
     cur.executemany(
         "INSERT INTO islemler VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [tuple(r) for r in _rows(txns)])
+    if meta:
+        _sql_table(cur, "hesap_meta", meta,
+                   [("kaynak", "TEXT"), ("ad", "TEXT"), ("tip", "TEXT"),
+                    ("acilis_bakiye", "REAL"), ("para_birimi", "TEXT")])
+    if anchors:
+        _sql_table(cur, "bakiye_capa", anchors,
+                   [("kaynak", "TEXT"), ("tarih", "TEXT"),
+                    ("hedef_bakiye", "REAL"), ("kaynak_dosya", "TEXT")])
     _sql_table(cur, "aylik", monthly,
                [("month", "TEXT"), ("income", "REAL"), ("expense", "REAL"),
                 ("net", "REAL"), ("card_spend", "REAL"), ("tx_count", "INTEGER")])

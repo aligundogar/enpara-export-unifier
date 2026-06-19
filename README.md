@@ -135,6 +135,23 @@ output/
 
 ---
 
+## Actual Budget'a aktarım (`actual-sync/`)
+
+`output/finans.db`'yi self-hosted [Actual Budget](https://actualbudget.org)'a
+aktaran Node aracı. 2 hesap (doğru açılış bakiyeleriyle) + Türkçe kategoriler +
+işlemler; kart ödemeleri **gerçek transfer**, **idempotent** (mükerrer engelleme),
+ve "Varlık ve Borç Dökümü" varsa kart bakiyesini gerçek borca çeken **bakiye
+çapası**.
+
+```bash
+cd actual-sync && npm install && cp config.example.json config.json   # düzenle
+npm run dry-run   # önizleme   ·   npm run apply   # aktar   ·   npm run verify
+```
+
+Ayrıntılar: [`actual-sync/README.md`](actual-sync/README.md).
+
+---
+
 ## Kategorileri özelleştirme
 
 Kategori kuralları `enpara_unifier/categorize.py` içinde basit anahtar-kelime
@@ -153,8 +170,9 @@ enpara_unifier/
 ├── categorize.py   # düzenlenebilir kategori kuralları
 ├── parsers.py      # 4 parser (kart PDF+OCR, hesap PDF, özet PDF, XLS)
 ├── analyze.py      # dedup, eşleştirme, tekrar eden, nakit akışı
-└── consolidate.py  # orkestratör + 4 format yazıcı
+└── consolidate.py  # orkestratör + 4 format yazıcı + hesap_meta/bakiye_capa
 run.py              # CLI
+actual-sync/        # finans.db → Actual Budget aktarıcı (Node) — kendi README'si
 ```
 
 ---

@@ -1,0 +1,16 @@
+{
+  "name": "enpara-actual-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Konsolide Enpara verisini (finans.db) Actual Budget'a aktarır",
+  "scripts": {
+    "dry-run": "node sync.mjs",
+    "apply": "node sync.mjs --apply",
+    "verify": "node verify.mjs",
+    "reset": "node reset.mjs"
+  },
+  "dependencies": {
+    "@actual-app/api": "^26.6.0"
+  }
+}

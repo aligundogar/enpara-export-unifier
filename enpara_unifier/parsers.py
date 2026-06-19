@@ -202,6 +202,37 @@ def parse_credit_card_pdf(path: str, ocr: bool = True, dpi: int = 350,
     return txns
 
 
+def parse_balance_snapshot(path: str) -> dict:
+    """'Varlık ve Borç Dökümü' PDF'i: güncel kredi kartı borcu, kredi kalanı vs.
+    Kart bakiyesini gerçek (faturalanmamış dahil) borca uzlaştırmak için kullanılır."""
+    doc = fitz.open(path)
+    text = N.clean_text(doc[0].get_text())
+
+    def g(p):
+        m = re.search(p, text)
+        return N.parse_money(m.group(1)) if m else None
+
+    d = None
+    m = re.search(r"(\d{2}\.\d{2}\.\d{4})\s*Tarihli Varl", text)
+    if m:
+        d = N.parse_date(m.group(1))
+    return {
+        "tarih": d,
+        "kredi_karti_borc": g(r"Kredi Kartları\s+([\d.]+,\d{2})"),
+        "kredi_kalan": g(r"Kredilerim\s+([\d.]+,\d{2})"),
+        "toplam_borc": g(r"([\d.]+,\d{2})\s+USD Cinsinden"),
+    }
+
+
+def credit_card_opening(path: str):
+    """Kredi kartı ekstresindeki 'Bir önceki ekstre bakiyeniz' (devreden borç).
+    Hesap reconcile için kart açılış bakiyesi = -(bu değer)."""
+    doc = fitz.open(path)
+    text = N.clean_text(doc[0].get_text())
+    m = re.search(r"bakiyeniz\s*(-?\s*[\d.]+,\d{2})\s*TL", text, re.IGNORECASE)
+    return N.parse_money(m.group(1)) if m else None
+
+
 # ===========================================================================
 #  HESAP HAREKETLERİ PDF  (temiz metin, Hareket tipi kolonlu)
 # ===========================================================================
