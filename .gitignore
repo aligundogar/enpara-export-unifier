@@ -1,0 +1,17 @@
+# --- KİŞİSEL FİNANSAL VERİ — asla commit etme! ---
+*.pdf
+*.xls
+*.xlsx
+output/
+input/
+ekstreler/
+.ocr_cache.json
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
