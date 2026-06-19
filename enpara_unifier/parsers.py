@@ -21,7 +21,8 @@ from typing import Optional
 import fitz  # PyMuPDF
 
 from . import normalize as N
-from .model import Transaction, SOURCE_CREDIT_CARD, SOURCE_ACCOUNT
+from .model import (Transaction, SOURCE_CREDIT_CARD, SOURCE_ACCOUNT,
+                    ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI)
 
 # --- yardımcılar ------------------------------------------------------------
 
@@ -31,6 +32,12 @@ _SUM_DATE = re.compile(r"^\d{2}/\d{2}/\d{2}$")
 _INSTALLMENT = re.compile(r"^\d{1,2}/\d{1,2}$")
 
 _PAYMENT_KW = ("CEP SUBESI", "KREDI KARTI ODEMESI")
+
+# Özet PDF açıklamalarının başındaki hareket tipi etiketleri (ASCII-katlanmış)
+_SUMMARY_TYPES = {
+    "ODEME", "GELEN TRANSFER", "GIDEN TRANSFER", "VERGI KESINTISI",
+    "FAIZ", "FAST", "HAVALE", "EFT", "OTOMATIK ODEME",
+}
 
 
 def _is_payment(desc_ascii: str) -> bool:
@@ -195,7 +202,8 @@ def parse_credit_card_pdf(path: str, ocr: bool = True, dpi: int = 350,
             # nakit akışı işareti: harcama negatif, kart ödemesi/iade pozitif
             amount = -raw
             txns.append(Transaction(
-                date=d, source=SOURCE_CREDIT_CARD, source_file=fname,
+                date=d, source=SOURCE_CREDIT_CARD, account=ACC_ENPARA_KART,
+                source_file=fname,
                 description=desc, amount=amount, installment=taksit,
                 internal_transfer=is_pay, description_ascii=desc_ascii,
             ))
@@ -269,7 +277,8 @@ def parse_account_pdf(path: str) -> list[Transaction]:
         desc = N.clean_text(" ".join(p for p in desc_parts if p))
         desc_ascii = N.ascii_fold(desc + " " + tipi)
         txns.append(Transaction(
-            date=d, source=SOURCE_ACCOUNT, source_file=fname,
+            date=d, source=SOURCE_ACCOUNT, account=ACC_ENPARA_VADESIZ,
+            source_file=fname,
             description=desc, amount=tutar or 0.0, balance=bakiye,
             hareket_tipi=tipi, internal_transfer=_is_payment(N.ascii_fold(desc)),
             description_ascii=desc_ascii,
@@ -312,11 +321,19 @@ def parse_account_summary_pdf(path: str):
         tutar = N.parse_money(lines[j])
         bakiye = N.parse_money(lines[j + 1]) if j + 1 < n and N.is_money_token(lines[j + 1]) else None
         desc = N.clean_text(" ".join(p for p in desc_parts if p))
-        # özet açıklaması "Ödeme, ...", "Gelen Transfer, ..." şeklinde; tip ilk parça
-        tipi = desc.split(",")[0].strip() if "," in desc else None
+        # özet açıklaması "Ödeme, ...", "Gelen Transfer, İSİM, ..." şeklinde:
+        # ilk parça hareket tipi → onu ayır, açıklama gönderen/alıcı adıyla başlasın
+        # (büyük hesap PDF'iyle tutarlı olsun; gelir/banka eşleştirmesi için kritik).
+        tipi = None
+        if "," in desc:
+            head = desc.split(",")[0].strip()
+            if N.ascii_fold(head) in _SUMMARY_TYPES:
+                tipi = head
+                desc = desc.split(",", 1)[1].strip()
         desc_ascii = N.ascii_fold(desc)
         txns.append(Transaction(
-            date=d, source=SOURCE_ACCOUNT, source_file=fname,
+            date=d, source=SOURCE_ACCOUNT, account=ACC_ENPARA_VADESIZ,
+            source_file=fname,
             description=desc, amount=tutar or 0.0, balance=bakiye,
             hareket_tipi=tipi, internal_transfer=_is_payment(desc_ascii),
             description_ascii=desc_ascii,
@@ -390,10 +407,55 @@ def parse_account_xls(path: str) -> list[Transaction]:
         bakiye = _xls_num(row[c_bak]) if c_bak is not None else None
         desc_ascii = N.ascii_fold(desc + " " + (tipi or ""))
         txns.append(Transaction(
-            date=d, source=SOURCE_ACCOUNT, source_file=fname,
+            date=d, source=SOURCE_ACCOUNT, account=ACC_ENPARA_VADESIZ,
+            source_file=fname,
             description=desc, amount=tutar or 0.0, balance=bakiye,
             hareket_tipi=tipi, internal_transfer=_is_payment(N.ascii_fold(desc)),
             description_ascii=desc_ascii,
+        ))
+    return txns
+
+
+# ===========================================================================
+#  GARANTİ BBVA XLS  (nokta-ondalık, "Etiket" sütunu, maskeli isim)
+# ===========================================================================
+
+def parse_garanti_xls(path: str) -> list[Transaction]:
+    import pandas as pd
+    fname = os.path.basename(path)
+    raw = pd.read_excel(path, header=None)
+    # başlık satırı: Tarih / Açıklama / Etiket / Tutar / Bakiye / Dekont No
+    hdr = None
+    for i in range(min(40, len(raw))):
+        vals = [str(v).strip() for v in raw.iloc[i].tolist()]
+        if "Tarih" in vals and "Tutar" in vals and "Bakiye" in vals:
+            hdr = i
+            break
+    if hdr is None:
+        return []
+    cols = {str(v).strip(): k for k, v in enumerate(raw.iloc[hdr].tolist())}
+    c = lambda name: next((k for v, k in cols.items() if name in v), None)
+    c_tarih, c_acik, c_etiket = cols.get("Tarih"), c("Açıklama"), c("Etiket")
+    c_tutar, c_bak = c("Tutar"), c("Bakiye")
+
+    txns = []
+    for i in range(hdr + 1, len(raw)):
+        row = raw.iloc[i].tolist()
+        d = N.parse_date(str(row[c_tarih])) if c_tarih is not None else None
+        if d is None:
+            continue
+        desc = N.clean_text(str(row[c_acik])) if c_acik is not None else ""
+        etiket = N.clean_text(str(row[c_etiket])) if c_etiket is not None else None
+        tutar = _xls_num(row[c_tutar]) if c_tutar is not None else None
+        bakiye = _xls_num(row[c_bak]) if c_bak is not None else None
+        if tutar is None:
+            continue
+        # gönderen/alıcı adı genelde "-FAST"/"-EFT"/"-MOBIL" öncesi
+        desc_ascii = N.ascii_fold(desc)
+        txns.append(Transaction(
+            date=d, source=SOURCE_ACCOUNT, account=ACC_GARANTI, source_file=fname,
+            description=desc, amount=tutar, balance=bakiye,
+            hareket_tipi=etiket, description_ascii=desc_ascii,
         ))
     return txns
 

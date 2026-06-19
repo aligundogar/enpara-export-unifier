@@ -165,15 +165,24 @@ eklemeniz yeterli (örn `"MIGROS"`, `"DONER"`).
 
 ```
 enpara_unifier/
-├── model.py        # birleşik Transaction şeması + işaret kuralı
+├── model.py        # birleşik Transaction şeması + işaret kuralı + hesap anahtarları
 ├── normalize.py    # tarih / para / metin (TR↔ASCII) normalizasyonu
-├── categorize.py   # düzenlenebilir kategori kuralları
-├── parsers.py      # 4 parser (kart PDF+OCR, hesap PDF, özet PDF, XLS)
-├── analyze.py      # dedup, eşleştirme, tekrar eden, nakit akışı
+├── categorize.py   # düzenlenebilir kategori kuralları (gider)
+├── counterparties.py # karşı-taraf yönlendirme: gelir/kişi/yatırım/öz-transfer
+├── parsers.py      # parser'lar: kart PDF+OCR, hesap PDF, özet PDF, Enpara XLS, Garanti XLS
+├── analyze.py      # dedup, genel transfer eşleştirme, tekrar eden, nakit akışı
 └── consolidate.py  # orkestratör + 4 format yazıcı + hesap_meta/bakiye_capa
 run.py              # CLI
 actual-sync/        # finans.db → Actual Budget aktarıcı (Node) — kendi README'si
 ```
+
+### Çok bankalı
+
+Enpara dışında başka bankaların (ör. **Garanti** XLS) hesap hareketleri de eklenebilir.
+Her banka Actual'da ayrı **hesap** olur; bankalar arası kendi transferlerin (ör.
+Garanti↔Enpara) **gerçek transfer** olarak eşleşir. Kişiler (alacak/verecek) ve
+yatırım platformları **off-budget hesap** olur; maaş/iş geliri ödeyenler **gelir**
+sayılır. Yönlendirme kuralları `enpara_unifier/counterparties.py` içinde düzenlenebilir.
 
 ---
 

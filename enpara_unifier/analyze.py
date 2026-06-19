@@ -8,19 +8,23 @@ from collections import defaultdict
 from datetime import timedelta
 from statistics import mean
 
-from .model import Transaction, SOURCE_CREDIT_CARD, SOURCE_ACCOUNT
+from .model import (Transaction, SOURCE_CREDIT_CARD, SOURCE_ACCOUNT,
+                    ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI)
+
+# Kendi ekstresi olan (iki taraflı eşleşebilen) hesaplar
+DATA_ACCOUNTS = {ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI}
 
 
-# --- 1) Hesap kayıtlarını kaynaklar arası tekilleştir ----------------------
+# --- 1) Hesap kayıtlarını HESAP BAZINDA tekilleştir ------------------------
 
 def dedupe_account(txns: list[Transaction]) -> list[Transaction]:
-    """XLS / Hesap PDF / Özet PDF arasında çakışan hesap satırlarını teke indir.
-    Anahtar: (tarih, tutar, bakiye). Bakiye en güçlü ayraçtır."""
+    """Aynı hesabın farklı kaynaklarındaki (XLS/PDF/özet) çakışan satırlarını
+    teke indir. Anahtar: (hesap, tarih, tutar, bakiye)."""
     acc = [t for t in txns if t.source == SOURCE_ACCOUNT]
     other = [t for t in txns if t.source != SOURCE_ACCOUNT]
     best: dict[tuple, Transaction] = {}
     for t in acc:
-        key = (t.date, round(t.amount, 2),
+        key = (t.account, t.date, round(t.amount, 2),
                round(t.balance, 2) if t.balance is not None else None)
         cur = best.get(key)
         if cur is None or _info_score(t) > _info_score(cur):
@@ -38,55 +42,54 @@ def _info_score(t: Transaction) -> int:
     return s
 
 
-# --- 2) Öz-transfer (kişinin kendi hesapları arası) tespiti ----------------
+# --- 2) Genel transfer eşleştirme (banka↔banka, kart↔hesap) ---------------
 
-def flag_self_transfers(txns: list[Transaction], holder: str | None):
-    """Gelen/Giden Transfer karşı tarafı hesap sahibiyse iç transfer say."""
-    if not holder:
-        return
-    from .normalize import ascii_fold
-    h = ascii_fold(holder)
-    if not h:
-        return
-    for t in txns:
-        if t.source != SOURCE_ACCOUNT:
-            continue
-        if "TRANSFER" in (t.description_ascii or "") and h in (t.description_ascii or ""):
-            t.internal_transfer = True
-            yon = "Gelen" if t.amount > 0 else "Giden"
-            t.category = f"Öz Transfer ({yon})"
+def match_transfers(txns: list[Transaction], day_tol: int = 5) -> int:
+    """transfer_to'su olan işlemleri eşleştirir.
 
-
-# --- 3) Kredi kartı ödemesi  <->  hesaptan çıkan ödeme eşleştirme -----------
-
-def match_card_payments(txns: list[Transaction], day_tol: int = 4) -> int:
-    """Karttaki 'Cep Şubesi' ödemesi ile hesaptaki 'kredi kartı ödemesi'ni
-    tutar + (yakın) tarihe göre eşleştir; match_id ata. Eşleşme sayısı döner."""
-    card_pays = [t for t in txns
-                 if t.source == SOURCE_CREDIT_CARD and t.internal_transfer]
-    acc_pays = [t for t in txns
-                if t.source == SOURCE_ACCOUNT and t.internal_transfer
-                and "KREDI KARTI ODEMESI" in (t.description_ascii or "")]
+    İki tarafı da verisi olan hesaplar arası (kart↔hesap, Enpara↔Garanti):
+    gönderen (negatif) tarafı transfer olarak TUTULUR, alan (pozitif) taraf
+    '__skip__' ile işaretlenir (Actual karşı tarafı gönderenden üretir).
+    Eşleşmeyen veri-hesabı transferleri normale düşürülür (hayalet kayıt olmasın).
+    Off-budget (kişi/yatırım) hedefleri eşleştirme istemez; olduğu gibi kalır.
+    """
+    receivers = [t for t in txns if t.transfer_to in DATA_ACCOUNTS and t.amount > 0]
     used = set()
     n = 0
-    for c in card_pays:
-        cand = None
-        for i, a in enumerate(acc_pays):
+    for s in txns:
+        if s.transfer_to not in DATA_ACCOUNTS or s.amount >= 0:
+            continue
+        for i, r in enumerate(receivers):
             if i in used:
                 continue
-            if abs(round(a.amount, 2)) != round(c.amount, 2):
+            if r.account != s.transfer_to or r.transfer_to != s.account:
                 continue
-            if abs((a.date - c.date).days) > day_tol:
+            if round(abs(s.amount), 2) != round(r.amount, 2):
                 continue
-            cand = i
-            break
-        if cand is not None:
-            used.add(cand)
-            mid = f"KK-{c.date:%Y%m%d}-{int(round(c.amount*100))}"
-            c.match_id = mid
-            acc_pays[cand].match_id = mid
+            if abs((r.date - s.date).days) > day_tol:
+                continue
+            used.add(i)
+            mid = f"TR-{s.date:%Y%m%d}-{int(round(abs(s.amount) * 100))}"
+            s.match_id = r.match_id = mid
+            r.transfer_to = "__skip__"      # alan taraf atlanır
             n += 1
+            break
+
+    # eşleşmeyen veri-hesabı transferleri → normale düşür (karşı taraf veride yok)
+    for t in txns:
+        if t.transfer_to in DATA_ACCOUNTS and not t.match_id:
+            _fallback_category(t)
+            t.transfer_to = None
     return n
+
+
+def _fallback_category(t: Transaction):
+    d = t.description_ascii or ""
+    if "KREDI KARTI ODEMESI" in d or "CEP SUBESI" in d:
+        t.category = "Kredi Kartı Ödemesi"
+    else:
+        t.category = "Öz Transfer (Gelen)" if t.amount > 0 else "Öz Transfer (Giden)"
+    t.internal_transfer = True
 
 
 # --- 4) Tekrar eden ödemeler / abonelikler ---------------------------------

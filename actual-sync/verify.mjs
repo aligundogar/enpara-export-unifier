@@ -36,10 +36,13 @@ const fmt = (n) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximum
 async function main() {
   const cfg = loadConfig();
   const db = new DatabaseSync(cfg.dbPath, { readOnly: true });
-  const meta = db.prepare('SELECT kaynak,ad,acilis_bakiye FROM hesap_meta').all();
-  const sums = {};
-  for (const m of meta)
-    sums[m.kaynak] = db.prepare('SELECT COALESCE(SUM(tutar),0) s FROM islemler WHERE kaynak=?').get(m.kaynak).s;
+  const meta = db.prepare('SELECT kaynak,ad,acilis_bakiye,offbudget FROM hesap_meta').all();
+  const ownSum = {};   // hesabın kendi işlemleri (on-budget bankalar)
+  const inSum = {};    // hesaba gelen transferler (off-budget kişi/yatırım)
+  for (const m of meta) {
+    ownSum[m.kaynak] = db.prepare('SELECT COALESCE(SUM(tutar),0) s FROM islemler WHERE hesap=?').get(m.kaynak).s;
+    inSum[m.kaynak] = db.prepare("SELECT COALESCE(SUM(tutar),0) s FROM islemler WHERE transfer_to=?").get(m.kaynak).s;
+  }
   let anchors = [];
   try { anchors = db.prepare('SELECT kaynak,hedef_bakiye FROM bakiye_capa').all(); } catch {}
   db.close();
@@ -58,8 +61,10 @@ async function main() {
     const actualBal = tx.reduce((s, t) => s + t.amount, 0) / 100;
 
     const anc = anchorOf(m.kaynak);
-    const expected = anc ? anc.hedef_bakiye : (m.acilis_bakiye + sums[m.kaynak]);
-    const basis = anc ? 'çapa hedefi (gerçek borç)' : 'açılış + işlemler';
+    let expected, basis;
+    if (anc) { expected = anc.hedef_bakiye; basis = 'çapa hedefi (gerçek borç)'; }
+    else if (m.offbudget) { expected = -inSum[m.kaynak]; basis = 'gelen transferler (alacak/verecek)'; }
+    else { expected = m.acilis_bakiye + ownSum[m.kaynak]; basis = 'açılış + işlemler'; }
     const ok = Math.abs(actualBal - expected) < 0.01;
     allOk = allOk && ok;
 

@@ -14,7 +14,40 @@ import fitz
 from . import parsers as P
 from . import analyze as A
 from .categorize import categorize
-from .model import Transaction, COLUMNS, COLUMNS_TR, SOURCE_CREDIT_CARD, SOURCE_ACCOUNT
+from . import counterparties as CP
+from .model import (Transaction, COLUMNS, COLUMNS_TR, SOURCE_CREDIT_CARD,
+                    SOURCE_ACCOUNT, ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI)
+
+
+def _route_txn(t: Transaction) -> None:
+    """Bir işlemi yönlendir: yapısal kart ödemesi / karşı-taraf (gelir/transfer)
+    / normal kategori. transfer_to, category, internal_transfer alanlarını set eder."""
+    d = t.description_ascii or ""
+    # 1) kart ödemesi (yapısal iç transfer)
+    if t.source == SOURCE_CREDIT_CARD and t.internal_transfer:   # karttaki "Cep Şubesi"
+        t.transfer_to = ACC_ENPARA_VADESIZ
+        t.category = "Kredi Kartı Ödemesi"
+        return
+    if t.account == ACC_ENPARA_VADESIZ and "KREDI KARTI ODEMESI" in d:
+        t.transfer_to = ACC_ENPARA_KART
+        t.internal_transfer = True
+        t.category = "Kredi Kartı Ödemesi"
+        return
+    # 2) karşı-taraf yönlendirme (gelir / kişi / yatırım / öz-transfer)
+    r = CP.route(d, t.account, t.hareket_tipi)
+    if r.get("transfer_to"):
+        t.transfer_to = r["transfer_to"]
+        t.internal_transfer = True
+        if r["transfer_to"] in CP.OFFBUDGET_ACCOUNTS:
+            t.category = "Transfer: " + CP.OFFBUDGET_ACCOUNTS[r["transfer_to"]][0]
+        else:
+            t.category = "Öz Transfer (Gelen)" if t.amount > 0 else "Öz Transfer (Giden)"
+        return
+    if r.get("category"):       # gelir
+        t.category = r["category"]
+        return
+    # 3) normal kategorize (gider)
+    t.category = categorize(t.description, t.source, t.hareket_tipi)
 
 
 # --- dosya sınıflandırma ----------------------------------------------------
@@ -22,7 +55,16 @@ from .model import Transaction, COLUMNS, COLUMNS_TR, SOURCE_CREDIT_CARD, SOURCE_
 def classify(path: str) -> str:
     low = path.lower()
     if low.endswith((".xls", ".xlsx")):
-        return "account_xls"
+        # Garanti mi Enpara mı? İlk hücrelere bak.
+        try:
+            import pandas as pd
+            head = " ".join(str(v) for v in pd.read_excel(path, header=None, nrows=5)
+                            .fillna("").values.ravel())
+        except Exception:
+            head = ""
+        if "GARANT" in head.upper():
+            return "garanti_xls"
+        return "account_xls"   # Enpara
     if not low.endswith(".pdf"):
         return "unknown"
     try:
@@ -104,6 +146,8 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
                 holder = holder or _extract_holder(f)
             elif kind == "account_xls":
                 t = P.parse_account_xls(f)
+            elif kind == "garanti_xls":
+                t = P.parse_garanti_xls(f)
             elif kind == "balance_snapshot":
                 snap = P.parse_balance_snapshot(f)
                 snap["source_file"] = name
@@ -122,14 +166,13 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
             print(f"  ✗ HATA {name}: {e}")
     cache.save()
 
-    # zenginleştirme
+    # zenginleştirme — yönlendirme: gelir / transfer / normal kategori
     for t in txns:
-        t.category = categorize(t.description, t.source, t.hareket_tipi)
-    A.flag_self_transfers(txns, holder)
+        _route_txn(t)
     txns = A.dedupe_account(txns)
     snapshots = _dedupe_snapshots(snapshots)
-    n_match = A.match_card_payments(txns)
-    txns.sort(key=lambda t: (t.date, t.source))
+    n_match = A.match_transfers(txns)
+    txns.sort(key=lambda t: (t.date, t.account))
 
     monthly = A.monthly_cashflow(txns)
     cats = A.category_breakdown(txns)
@@ -184,46 +227,59 @@ def _write_csvs(out, txns, monthly, cats, recurring, snapshots):
                     "Kredi Tutarı", "Sonraki Taksit", "Kaynak Dosya"])
 
 
-def _account_meta(txns, cc_files):
-    """Actual'a aktarım için hesap tanımları + açılış bakiyeleri.
-    Açılış bakiyesi sayesinde Actual'daki hesap bakiyeleri Enpara'nınkiyle tutar."""
-    from .model import SOURCE_CREDIT_CARD as CC, SOURCE_ACCOUNT as ACC
-    meta = []
+def _opening_from_balance(txns, acc_key):
+    """açılış = son_bakiye − Σ(tutarlar) — gün-içi sıralamadan bağımsız, kesin."""
+    atx = [t for t in txns if t.account == acc_key and t.balance is not None]
+    if not atx:
+        return None
+    final = max(atx, key=lambda t: t.date)        # en güncel tarihli satır
+    total = sum(t.amount for t in txns if t.account == acc_key)
+    return round(final.balance - total, 2)
 
-    # Vadesiz: en erken hesap işleminden geriye -> açılış = bakiye - tutar
-    acc_tx = sorted([t for t in txns if t.source == ACC and t.balance is not None],
-                    key=lambda t: t.date)
-    acc_open = round(acc_tx[0].balance - acc_tx[0].amount, 2) if acc_tx else 0.0
-    meta.append({"kaynak": ACC, "ad": "Enpara Vadesiz TL", "tip": "checking",
-                 "acilis_bakiye": acc_open, "para_birimi": "TL"})
+
+def _account_meta(txns, cc_files):
+    """Tüm hesap tanımları + açılış bakiyeleri (Actual aktarımı için).
+    Bankalar on-budget; kişi/yatırım hesapları off-budget (açılış 0, transferlerle dolar)."""
+    meta = []
+    BANKS = [(ACC_ENPARA_VADESIZ, "Enpara Vadesiz TL"), (ACC_GARANTI, "Garanti TL")]
+    for acc_key, name in BANKS:
+        if not any(t.account == acc_key for t in txns):
+            continue
+        meta.append({"kaynak": acc_key, "ad": name, "tip": "checking",
+                     "acilis_bakiye": _opening_from_balance(txns, acc_key) or 0.0,
+                     "para_birimi": "TL", "offbudget": 0})
 
     # Kredi kartı: en erken ekstrenin 'önceki ekstre bakiyesi' = devreden borç
-    card_open = 0.0
-    if cc_files:
-        def stmt_date(p):
-            m = re.search(r"(\d{2})[.](\d{2})[.](\d{4})", os.path.basename(p))
-            return (int(m.group(3)), int(m.group(2))) if m else (9999, 99)
-        earliest = min(cc_files, key=stmt_date)
-        prev = P.credit_card_opening(earliest)
-        if prev is not None:
-            card_open = round(-prev, 2)   # devreden borç -> negatif başlangıç
-    if any(t.source == CC for t in txns):
-        meta.append({"kaynak": CC, "ad": "Enpara Kredi Kartı", "tip": "credit",
-                     "acilis_bakiye": card_open, "para_birimi": "TL"})
+    if any(t.account == ACC_ENPARA_KART for t in txns):
+        card_open = 0.0
+        if cc_files:
+            def stmt_date(p):
+                m = re.search(r"(\d{2})[.](\d{2})[.](\d{4})", os.path.basename(p))
+                return (int(m.group(3)), int(m.group(2))) if m else (9999, 99)
+            prev = P.credit_card_opening(min(cc_files, key=stmt_date))
+            if prev is not None:
+                card_open = round(-prev, 2)
+        meta.append({"kaynak": ACC_ENPARA_KART, "ad": "Enpara Kredi Kartı",
+                     "tip": "credit", "acilis_bakiye": card_open,
+                     "para_birimi": "TL", "offbudget": 0})
+
+    # Off-budget hesaplar (kişi/yatırım) — sadece transferlerde geçenler
+    refs = {t.transfer_to for t in txns if t.transfer_to in CP.OFFBUDGET_ACCOUNTS}
+    for k in sorted(refs):
+        name, tip = CP.OFFBUDGET_ACCOUNTS[k]
+        meta.append({"kaynak": k, "ad": name, "tip": tip,
+                     "acilis_bakiye": 0.0, "para_birimi": "TL", "offbudget": 1})
     return meta
 
 
 def _balance_anchors(balance_snaps):
-    """Varlık/Borç snapshot'larından hesap 'hedef bakiyeleri'.
-    En güncel snapshot esas alınır. Kart için hedef = -(güncel borç) — böylece
-    faturalanmamış son harcamalar tek bir uzlaştırma işlemiyle yansıtılır."""
-    from .model import SOURCE_CREDIT_CARD as CC
+    """Varlık/Borç snapshot → kart 'hedef bakiyesi' (faturalanmamış borç dahil)."""
     if not balance_snaps:
         return []
     latest = max(balance_snaps, key=lambda s: s.get("tarih") or date.min)
     anchors = []
     if latest.get("kredi_karti_borc") is not None:
-        anchors.append({"kaynak": CC, "tarih": latest.get("tarih"),
+        anchors.append({"kaynak": ACC_ENPARA_KART, "tarih": latest.get("tarih"),
                         "hedef_bakiye": round(-latest["kredi_karti_borc"], 2),
                         "kaynak_dosya": latest.get("source_file")})
     return anchors
@@ -266,17 +322,24 @@ def _write_sqlite(out, txns, monthly, cats, recurring, snapshots, meta=None, anc
         os.remove(path)
     con = sqlite3.connect(path)
     cur = con.cursor()
-    cur.execute("""CREATE TABLE islemler(
-        tarih TEXT, kaynak TEXT, hareket_tipi TEXT, aciklama TEXT, kategori TEXT,
-        tutar REAL, para_birimi TEXT, bakiye REAL, taksit TEXT,
-        ic_transfer INTEGER, eslesme TEXT, kaynak_dosya TEXT)""")
-    cur.executemany(
-        "INSERT INTO islemler VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        [tuple(r) for r in _rows(txns)])
+    # islemler tablosu COLUMNS'a göre (account, transfer_to dahil)
+    _col_sql = {
+        "date": "tarih TEXT", "account": "hesap TEXT", "source": "kaynak TEXT",
+        "hareket_tipi": "hareket_tipi TEXT", "description": "aciklama TEXT",
+        "category": "kategori TEXT", "amount": "tutar REAL",
+        "currency": "para_birimi TEXT", "balance": "bakiye REAL",
+        "installment": "taksit TEXT", "internal_transfer": "ic_transfer INTEGER",
+        "transfer_to": "transfer_to TEXT", "match_id": "eslesme TEXT",
+        "source_file": "kaynak_dosya TEXT",
+    }
+    cur.execute("CREATE TABLE islemler(" + ", ".join(_col_sql[c] for c in COLUMNS) + ")")
+    ph = ",".join("?" * len(COLUMNS))
+    cur.executemany(f"INSERT INTO islemler VALUES ({ph})", [tuple(r) for r in _rows(txns)])
     if meta:
         _sql_table(cur, "hesap_meta", meta,
                    [("kaynak", "TEXT"), ("ad", "TEXT"), ("tip", "TEXT"),
-                    ("acilis_bakiye", "REAL"), ("para_birimi", "TEXT")])
+                    ("acilis_bakiye", "REAL"), ("para_birimi", "TEXT"),
+                    ("offbudget", "INTEGER")])
     if anchors:
         _sql_table(cur, "bakiye_capa", anchors,
                    [("kaynak", "TEXT"), ("tarih", "TEXT"),

@@ -18,23 +18,30 @@ from typing import Optional
 
 
 SOURCE_CREDIT_CARD = "kredi_karti"
-SOURCE_ACCOUNT = "vadesiz_hesap"
+SOURCE_ACCOUNT = "vadesiz_hesap"   # her bankanın vadesiz/çek hesabı (Enpara, Garanti...)
+
+# Mantıksal hesap anahtarları (Actual'daki ayrı hesaplara karşılık gelir)
+ACC_ENPARA_VADESIZ = "enpara_vadesiz"
+ACC_ENPARA_KART = "enpara_kart"
+ACC_GARANTI = "garanti"
 
 
 @dataclass
 class Transaction:
     date: date
-    source: str                      # SOURCE_CREDIT_CARD | SOURCE_ACCOUNT
+    source: str                      # SOURCE_CREDIT_CARD | SOURCE_ACCOUNT (hesap tipi)
     source_file: str
     description: str                 # temizlenmiş açıklama (Türkçe, OCR'lı)
     amount: float                    # işaretli — yukarıdaki kurala göre
+    account: str = ""                # mantıksal hesap anahtarı (ACC_*)
     currency: str = "TL"
     balance: Optional[float] = None  # işlem sonrası bakiye (varsa)
     hareket_tipi: Optional[str] = None   # hesap hareket tipi (Ödeme, Gelen Transfer...)
     installment: Optional[str] = None    # kredi kartı taksiti, örn "2/3"
     category: str = "Diğer"
-    internal_transfer: bool = False  # kart<->hesap iç transferi mi
+    internal_transfer: bool = False  # iç transfer mi (kart ödemesi / öz / kişi / yatırım)
     match_id: Optional[str] = None   # eşleşen iç transferin kimliği
+    transfer_to: Optional[str] = None  # transfer hedefi hesap anahtarı (varsa)
     description_ascii: str = ""      # eşleştirme için ASCII-katlanmış büyük harf
 
     def to_row(self) -> dict:
@@ -45,14 +52,15 @@ class Transaction:
 
 # Birleşik tablo kolon sırası (çıktılarda kullanılır)
 COLUMNS = [
-    "date", "source", "hareket_tipi", "description", "category",
+    "date", "account", "source", "hareket_tipi", "description", "category",
     "amount", "currency", "balance", "installment",
-    "internal_transfer", "match_id", "source_file",
+    "internal_transfer", "transfer_to", "match_id", "source_file",
 ]
 
 # Türkçe kolon başlıkları (Excel/CSV için)
 COLUMNS_TR = {
     "date": "Tarih",
+    "account": "Hesap",
     "source": "Kaynak",
     "hareket_tipi": "Hareket Tipi",
     "description": "Açıklama",
@@ -62,6 +70,7 @@ COLUMNS_TR = {
     "balance": "Bakiye",
     "installment": "Taksit",
     "internal_transfer": "İç Transfer",
+    "transfer_to": "Transfer Hedefi",
     "match_id": "Eşleşme",
     "source_file": "Kaynak Dosya",
 }
