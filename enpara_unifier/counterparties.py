@@ -80,15 +80,20 @@ def party_key(name: str) -> str:
     return "person:" + slug if slug else ACC_DIGER
 
 
-def looks_personal(desc_ascii: str, hareket_tipi: str | None) -> bool:
-    """Tanınmayan ama açıkça kişiye/kişiden FAST/EFT transferi mi (→ Diğer Kişiler)."""
+def is_transfer_like(desc_ascii: str, hareket_tipi: str | None) -> bool:
+    """Kişiye/kişiden havale/FAST/EFT gibi bir transfer mi (kurum değil)."""
     ht = ascii_fold(hareket_tipi or "")
     is_tr = ("TRANSFER" in ht or "PARA TRANSFERI" in ht
              or "FAST" in desc_ascii or "EFT" in desc_ascii
-             or "BIREYSEL ODEME" in desc_ascii)
+             or "BIREYSEL ODEME" in desc_ascii or "HAVALE" in desc_ascii)
     if not is_tr:
         return False
-    if any(tok in desc_ascii for tok in _NON_PERSON):
+    return not any(tok in desc_ascii for tok in _NON_PERSON)
+
+
+def looks_personal(desc_ascii: str, hareket_tipi: str | None) -> bool:
+    """Transfer + çıkarılabilir KİŞİ ADI var (→ kişiye özel hesap)."""
+    if not is_transfer_like(desc_ascii, hareket_tipi):
         return False
     name = desc_ascii.split("-")[0].split(",")[0].strip()
     words = [w for w in name.split() if w.isalpha() and len(w) > 1]
@@ -96,7 +101,8 @@ def looks_personal(desc_ascii: str, hareket_tipi: str | None) -> bool:
 
 
 def route(desc_ascii: str, account_key: str, hareket_tipi: str | None) -> dict:
-    """{category?, is_income?, transfer_to?} döndürür; boşsa normal kategorize edilir."""
+    """Açık kurallar: {category?, is_income?, transfer_to?}. Kişi/Diğer yönlendirme
+    consolidate._route_txn'de (strict-kategorize sonrası) yapılır."""
     for pat, cat in INCOME_RULES:
         if pat in desc_ascii:
             return {"category": cat, "is_income": True}
@@ -106,6 +112,4 @@ def route(desc_ascii: str, account_key: str, hareket_tipi: str | None) -> dict:
     if _is_self(desc_ascii):
         other = ACC_GARANTI if account_key.startswith("enpara") else ACC_ENPARA_VADESIZ
         return {"transfer_to": other}
-    if looks_personal(desc_ascii, hareket_tipi):
-        return {"transfer_to": ACC_DIGER}
     return {}

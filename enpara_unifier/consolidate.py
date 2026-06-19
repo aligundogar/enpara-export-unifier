@@ -13,7 +13,7 @@ import fitz
 
 from . import parsers as P
 from . import analyze as A
-from .categorize import categorize
+from .categorize import categorize, categorize_strict
 from . import counterparties as CP
 from .model import (Transaction, COLUMNS, COLUMNS_TR, SOURCE_CREDIT_CARD,
                     SOURCE_ACCOUNT, ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI)
@@ -36,7 +36,7 @@ def _route_txn(t: Transaction, derived: dict) -> None:
         return
     # 2) açık karşı-taraf kuralları (gelir / belirli kişi / yatırım / öz-transfer)
     r = CP.route(d, t.account, t.hareket_tipi)
-    if r.get("transfer_to") and r["transfer_to"] != CP.ACC_DIGER:
+    if r.get("transfer_to"):
         t.transfer_to = r["transfer_to"]
         t.internal_transfer = True
         if r["transfer_to"] in CP.OFFBUDGET_ACCOUNTS:
@@ -47,8 +47,14 @@ def _route_txn(t: Transaction, derived: dict) -> None:
     if r.get("category"):       # gelir
         t.category = r["category"]
         return
-    # 3) TAM PARSE: tanınan her kişi kendi alacak/verecek hesabını alır
-    if r.get("transfer_to") == CP.ACC_DIGER or CP.looks_personal(d, t.hareket_tipi):
+    # 3) BİLİNEN satıcı/resmi ödeme/abonelik → kategori (kişi-yönlendirmeden ÖNCE,
+    #    yoksa 'İtimat Eğitim ... ehliyet' gibi kurumlar kişi hesabı olur)
+    strict = categorize_strict(t.description, t.hareket_tipi)
+    if strict:
+        t.category = strict
+        return
+    # 4) TAM PARSE: adı çıkarılabilen kişi → kendi alacak/verecek hesabı
+    if CP.looks_personal(d, t.hareket_tipi):
         name = CP.party_name(t.description) or "Bilinmeyen Kişi"
         key = CP.party_key(name)
         derived.setdefault(key, (name, "kisi"))
@@ -56,7 +62,13 @@ def _route_txn(t: Transaction, derived: dict) -> None:
         t.internal_transfer = True
         t.category = "Transfer: " + name
         return
-    # 4) normal kategorize (gider)
+    # 5) isimsiz transfer (ör. MOBIL-FAST-...) → Diğer Kişiler çöp kutusu
+    if CP.is_transfer_like(d, t.hareket_tipi):
+        t.transfer_to = CP.ACC_DIGER
+        t.internal_transfer = True
+        t.category = "Transfer: Diğer Kişiler"
+        return
+    # 6) normal kategorize (gider) → bulunamazsa 'Diğer'
     t.category = categorize(t.description, t.source, t.hareket_tipi)
 
 
