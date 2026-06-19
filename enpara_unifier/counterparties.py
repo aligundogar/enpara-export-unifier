@@ -1,56 +1,26 @@
-"""Karşı-taraf yönlendirme — DÜZENLENEBİLİR.
+"""Karşı-taraf yönlendirme motoru (GENEL — kişisel veri içermez).
 
 Bir işlemin karşı tarafına göre nasıl ele alınacağını belirler:
-  • gelir       → işveren/müşteri (***REMOVED***, ***REMOVED***, maaş) = GELİR kategorisi
+  • gelir       → işveren/müşteri = GELİR kategorisi
   • transfer    → kendi başka bankan / kişi (alacak-verecek) / yatırım hesabı
-  • (eşleşmezse) → normal kategorize (gider) — categorize.py devreye girer
+  • (eşleşmezse) → normal kategorize (gider)
+
+KİŞİSEL kurallar (isimler, işveren, borçlar) bu dosyada DEĞİL; gitignore'lu
+`rules.local.json` dosyasında tutulur (şablon: `rules.example.json`). Böylece
+araç public repoda paylaşılabilir, kişisel veri sızmaz.
 
 Eşleştirme ASCII'ye katlanmış BÜYÜK harf açıklama üzerinde yapılır.
 """
 
 from __future__ import annotations
 
+import json
+import os
+
 from .normalize import ascii_fold
 from .model import ACC_ENPARA_VADESIZ, ACC_GARANTI
 
-# Off-budget hesap anahtarları (Actual'da ayrı hesap olur)
-ACC_***REMOVED*** = "person:***REMOVED***"
-ACC_***REMOVED*** = "person:***REMOVED***"
-ACC_DIGER = "person:diger"
-ACC_BINANCE = "inv:binance"
-ACC_MIDAS = "inv:midas"
-
-# Off-budget hesapların görünen adları + tipi
-OFFBUDGET_ACCOUNTS = {
-    ACC_***REMOVED***: ("***REMOVED*** (***REMOVED***)", "kisi"),
-    ACC_***REMOVED***: ("***REMOVED*** (kuzen)", "kisi"),
-    ACC_DIGER: ("Diğer Kişiler (Borç/Alacak)", "kisi"),
-    ACC_BINANCE: ("Binance (yatırım)", "yatirim"),
-    ACC_MIDAS: ("Midas (yatırım)", "yatirim"),
-}
-
-# Gelir karşı-tarafları: (ASCII anahtar, gelir kategorisi)
-INCOME_RULES = [
-    ("***REMOVED***", "İş Geliri (***REMOVED***)"),
-    ("***REMOVED***", "İş Geliri (***REMOVED***)"),       # = ***REMOVED***
-    ("***REMOVED***", "Maaş (***REMOVED***)"),
-    ("***REMOVED***", "Maaş (***REMOVED***)"),
-    ("***REMOVED***", "Maaş"),
-]
-
-# Belirli kişi/yatırım transfer hedefleri: (ASCII anahtar, hesap)
-TRANSFER_RULES = [
-    ("***REMOVED***", ACC_***REMOVED***),
-    ("***REMOVED***", ACC_***REMOVED***),
-    ("BINANCE", ACC_BINANCE),
-    ("MIDAS", ACC_MIDAS),
-]
-
-# Kendi adın (banka↔banka öz-transfer). Garanti maskeler: "AL**** GU****".
-# Aile (***REMOVED***/EKIN/***REMOVED***) HARİÇ — sadece "ALI" / maskeli.
-SELF_PATTERNS = ["***REMOVED***", "AL**** GU****", "AL** GU**"]
-
-# 'Diğer Kişiler' çöp kutusuna düşmeyi engelleyen kurum/işlem belirteçleri
+# 'Diğer Kişiler' çöp kutusuna düşmeyi engelleyen kurum/işlem belirteçleri (genel)
 _NON_PERSON = [
     "LTD", "A.S", "TIC", " SAN", "MARKET", "GIDA", "ELEKTRON", "ENERJI",
     "KESINTI", "VERGI", "KREDI", "MOKA", "IYZICO", "PARAM", "PAYCELL",
@@ -58,9 +28,56 @@ _NON_PERSON = [
     "ATM", "PARA YATIRMA", "MENKUL", "SIGORTA", "ODEME HIZMET", "ANONIM",
 ]
 
+# Catch-all kişisel transfer hedefi (her zaman tanımlı olmalı)
+ACC_DIGER = "person:diger"
+
+# --- yerel kuralları yükle --------------------------------------------------
+
+def _load_rules() -> dict:
+    """rules.local.json (yoksa rules.example.json) yükler."""
+    base = os.path.dirname(os.path.dirname(__file__))   # paket üst klasörü
+    for fname in ("rules.local.json", "rules.example.json"):
+        p = os.environ.get("ENPARA_RULES") if fname == "rules.local.json" else None
+        p = p or os.path.join(base, fname)
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+    return {}
+
+
+_R = _load_rules()
+
+INCOME_RULES = [tuple(x) for x in _R.get("income", [])]          # [(anahtar, kategori)]
+TRANSFER_RULES = [tuple(x) for x in _R.get("transfers", [])]     # [(anahtar, hesap)]
+SELF_PATTERNS = _R.get("holder_patterns", [])                   # kendi adın (öz-transfer)
+OFFBUDGET_ACCOUNTS = {k: tuple(v) for k, v in _R.get("offbudget_accounts", {}).items()}
+MANUAL_BALANCES = {k: tuple(v) for k, v in _R.get("manual_balances", {}).items()}
+
+# Diğer Kişiler her zaman tanımlı olsun
+OFFBUDGET_ACCOUNTS.setdefault(ACC_DIGER, ("Diğer Kişiler (Borç/Alacak)", "kisi"))
+
 
 def _is_self(desc_ascii: str) -> bool:
     return any(p in desc_ascii for p in SELF_PATTERNS)
+
+
+def party_name(description: str) -> str:
+    """Açıklamadan karşı tarafın temiz adını çıkarır.
+    'AD SOYAD-FAST-...' / 'AD SOYAD, Bireysel Ödeme' → 'Ad Soyad'."""
+    s = description or ""
+    for sep in ("-", ","):
+        i = s.find(sep)
+        if i > 0:
+            s = s[:i]
+    return " ".join(s.split()).strip()
+
+
+def party_key(name: str) -> str:
+    """Ada göre kararlı off-budget hesap anahtarı: 'person:ad_soyad'."""
+    slug = ascii_fold(name).lower()
+    slug = "".join(c if c.isalnum() else "_" for c in slug).strip("_")
+    slug = "_".join(p for p in slug.split("_") if p)[:40]
+    return "person:" + slug if slug else ACC_DIGER
 
 
 def looks_personal(desc_ascii: str, hareket_tipi: str | None) -> bool:

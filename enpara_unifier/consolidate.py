@@ -19,9 +19,10 @@ from .model import (Transaction, COLUMNS, COLUMNS_TR, SOURCE_CREDIT_CARD,
                     SOURCE_ACCOUNT, ACC_ENPARA_VADESIZ, ACC_ENPARA_KART, ACC_GARANTI)
 
 
-def _route_txn(t: Transaction) -> None:
-    """Bir işlemi yönlendir: yapısal kart ödemesi / karşı-taraf (gelir/transfer)
-    / normal kategori. transfer_to, category, internal_transfer alanlarını set eder."""
+def _route_txn(t: Transaction, derived: dict) -> None:
+    """Bir işlemi yönlendir: yapısal kart ödemesi / karşı-taraf (gelir/transfer/
+    kişi) / normal kategori. `derived`: otomatik üretilen kişi hesaplarının
+    {anahtar: (ad, tip)} kaydı (tam parse — her kişi ayrı hesap)."""
     d = t.description_ascii or ""
     # 1) kart ödemesi (yapısal iç transfer)
     if t.source == SOURCE_CREDIT_CARD and t.internal_transfer:   # karttaki "Cep Şubesi"
@@ -33,9 +34,9 @@ def _route_txn(t: Transaction) -> None:
         t.internal_transfer = True
         t.category = "Kredi Kartı Ödemesi"
         return
-    # 2) karşı-taraf yönlendirme (gelir / kişi / yatırım / öz-transfer)
+    # 2) açık karşı-taraf kuralları (gelir / belirli kişi / yatırım / öz-transfer)
     r = CP.route(d, t.account, t.hareket_tipi)
-    if r.get("transfer_to"):
+    if r.get("transfer_to") and r["transfer_to"] != CP.ACC_DIGER:
         t.transfer_to = r["transfer_to"]
         t.internal_transfer = True
         if r["transfer_to"] in CP.OFFBUDGET_ACCOUNTS:
@@ -46,7 +47,16 @@ def _route_txn(t: Transaction) -> None:
     if r.get("category"):       # gelir
         t.category = r["category"]
         return
-    # 3) normal kategorize (gider)
+    # 3) TAM PARSE: tanınan her kişi kendi alacak/verecek hesabını alır
+    if r.get("transfer_to") == CP.ACC_DIGER or CP.looks_personal(d, t.hareket_tipi):
+        name = CP.party_name(t.description) or "Bilinmeyen Kişi"
+        key = CP.party_key(name)
+        derived.setdefault(key, (name, "kisi"))
+        t.transfer_to = key
+        t.internal_transfer = True
+        t.category = "Transfer: " + name
+        return
+    # 4) normal kategorize (gider)
     t.category = categorize(t.description, t.source, t.hareket_tipi)
 
 
@@ -94,7 +104,7 @@ _NAME_RE = re.compile(
 
 
 def _extract_holder(path: str) -> str | None:
-    """İlk sayfada 'Ali Gündoğar' gibi Başlık-Düzeni iki-dört kelimelik ilk
+    """İlk sayfada 'Ad Soyad' gibi Başlık-Düzeni iki-dört kelimelik ilk
     kişi adını döndürür (etiket satırlarını atlar)."""
     try:
         doc = fitz.open(path)
@@ -166,9 +176,10 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
             print(f"  ✗ HATA {name}: {e}")
     cache.save()
 
-    # zenginleştirme — yönlendirme: gelir / transfer / normal kategori
+    # zenginleştirme — yönlendirme: gelir / transfer / kişi / normal kategori
+    derived = {}     # otomatik üretilen kişi hesapları {anahtar: (ad, tip)}
     for t in txns:
-        _route_txn(t)
+        _route_txn(t, derived)
     txns = A.dedupe_account(txns)
     snapshots = _dedupe_snapshots(snapshots)
     n_match = A.match_transfers(txns)
@@ -177,7 +188,7 @@ def consolidate(input_dir: str, output_dir: str, ocr: bool = True,
     monthly = A.monthly_cashflow(txns)
     cats = A.category_breakdown(txns)
     recurring = A.detect_recurring(txns)
-    meta = _account_meta(txns, cc_files)
+    meta = _account_meta(txns, cc_files, derived)
     anchors = _balance_anchors(balance_snaps)
 
     # çıktılar
@@ -237,7 +248,7 @@ def _opening_from_balance(txns, acc_key):
     return round(final.balance - total, 2)
 
 
-def _account_meta(txns, cc_files):
+def _account_meta(txns, cc_files, derived=None):
     """Tüm hesap tanımları + açılış bakiyeleri (Actual aktarımı için).
     Bankalar on-budget; kişi/yatırım hesapları off-budget (açılış 0, transferlerle dolar)."""
     meta = []
@@ -263,25 +274,34 @@ def _account_meta(txns, cc_files):
                      "tip": "credit", "acilis_bakiye": card_open,
                      "para_birimi": "TL", "offbudget": 0})
 
-    # Off-budget hesaplar (kişi/yatırım) — sadece transferlerde geçenler
-    refs = {t.transfer_to for t in txns if t.transfer_to in CP.OFFBUDGET_ACCOUNTS}
+    # Off-budget hesaplar: transferlerde geçen (kişi/yatırım/şirket) + elle tanımlı
+    derived = derived or {}
+    OFF = ("person:", "inv:", "company:")
+    refs = {t.transfer_to for t in txns
+            if t.transfer_to and str(t.transfer_to).startswith(OFF)}
+    refs |= set(CP.MANUAL_BALANCES.keys())
     for k in sorted(refs):
-        name, tip = CP.OFFBUDGET_ACCOUNTS[k]
+        name, tip = (CP.OFFBUDGET_ACCOUNTS.get(k) or derived.get(k) or (k, "kisi"))
         meta.append({"kaynak": k, "ad": name, "tip": tip,
                      "acilis_bakiye": 0.0, "para_birimi": "TL", "offbudget": 1})
     return meta
 
 
 def _balance_anchors(balance_snaps):
-    """Varlık/Borç snapshot → kart 'hedef bakiyesi' (faturalanmamış borç dahil)."""
-    if not balance_snaps:
-        return []
-    latest = max(balance_snaps, key=lambda s: s.get("tarih") or date.min)
+    """Hesap 'hedef bakiyeleri' (bakiye çapası):
+    • kart: Varlık/Borç snapshot'ından (faturalanmamış borç dahil)
+    • elle: counterparties.MANUAL_BALANCES (nakit-dışı alacak/verecek)."""
     anchors = []
-    if latest.get("kredi_karti_borc") is not None:
-        anchors.append({"kaynak": ACC_ENPARA_KART, "tarih": latest.get("tarih"),
-                        "hedef_bakiye": round(-latest["kredi_karti_borc"], 2),
-                        "kaynak_dosya": latest.get("source_file")})
+    if balance_snaps:
+        latest = max(balance_snaps, key=lambda s: s.get("tarih") or date.min)
+        if latest.get("kredi_karti_borc") is not None:
+            anchors.append({"kaynak": ACC_ENPARA_KART, "tarih": latest.get("tarih"),
+                            "hedef_bakiye": round(-latest["kredi_karti_borc"], 2),
+                            "aciklama": "Varlık/Borç dökümü ile uzlaştırma"})
+    today = date.today()
+    for acc, (bal, note) in CP.MANUAL_BALANCES.items():
+        anchors.append({"kaynak": acc, "tarih": today,
+                        "hedef_bakiye": round(float(bal), 2), "aciklama": note})
     return anchors
 
 
@@ -343,7 +363,7 @@ def _write_sqlite(out, txns, monthly, cats, recurring, snapshots, meta=None, anc
     if anchors:
         _sql_table(cur, "bakiye_capa", anchors,
                    [("kaynak", "TEXT"), ("tarih", "TEXT"),
-                    ("hedef_bakiye", "REAL"), ("kaynak_dosya", "TEXT")])
+                    ("hedef_bakiye", "REAL"), ("aciklama", "TEXT")])
     _sql_table(cur, "aylik", monthly,
                [("month", "TEXT"), ("income", "REAL"), ("expense", "REAL"),
                 ("net", "REAL"), ("card_spend", "REAL"), ("tx_count", "INTEGER")])

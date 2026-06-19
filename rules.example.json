@@ -1,0 +1,25 @@
+{
+  "_aciklama": "Bu dosyayı 'rules.local.json' olarak kopyalayıp kendi verinizle doldurun. rules.local.json gitignore'ludur (kişisel veri repoya girmez). Anahtarlar ASCII BÜYÜK harf (ör. 'DÖNER' yerine 'DONER').",
+
+  "holder_patterns": ["AD SOYAD", "AD**** SO****"],
+
+  "income": [
+    ["ACME LTD", "Maaş"],
+    ["XYZ BILISIM", "İş Geliri (XYZ)"]
+  ],
+
+  "transfers": [
+    ["MEHMET DEMIR", "person:mehmet"],
+    ["BINANCE", "inv:binance"]
+  ],
+
+  "offbudget_accounts": {
+    "person:mehmet": ["Mehmet (arkadaş)", "kisi"],
+    "person:diger": ["Diğer Kişiler (Borç/Alacak)", "kisi"],
+    "inv:binance": ["Binance (yatırım)", "yatirim"]
+  },
+
+  "manual_balances": {
+    "person:mehmet": [-1000, "örnek: net borç (nakit-dışı; + sana borçlu, - sen borçlusun)"]
+  }
+}

@@ -6,6 +6,10 @@ output/
 input/
 ekstreler/
 .ocr_cache.json
+# kişisel karşı-taraf kuralları (isimler/işveren/borçlar)
+rules.local.json
+# Actual sunucu şifresi
+actual-sync/config.json
 
 # --- Python ---
 .venv/

@@ -22,10 +22,10 @@ import { dirname, resolve } from 'node:path';
 const __dir = dirname(fileURLToPath(import.meta.url));
 const APPLY = process.argv.includes('--apply');
 
-// Gelir kategorileri (is_income grubuna girer)
+// Gelir kategorileri (is_income grubuna girer). Spesifik gelir adları (ör.
+// "Maaş (Firma)") kişiye özeldir → catGroupOf'taki /Gelir|Maaş|Gelen/ deseni yakalar.
 const INCOME_CATS = [
-  'Gelen Transfer', 'Öz Transfer (Gelen)', 'Gelen Havale (Gelir)',
-  'İş Geliri (***REMOVED***)', 'Maaş', 'Maaş (***REMOVED***)',
+  'Gelen Transfer', 'Öz Transfer (Gelen)', 'Gelen Havale (Gelir)', 'Maaş',
 ];
 const GROUPS = [
   { group: 'Gelir', is_income: true, cats: INCOME_CATS },
@@ -72,7 +72,7 @@ function readData(dbPath) {
     `SELECT rowid, tarih,hesap,kaynak,hareket_tipi,aciklama,kategori,tutar,bakiye,transfer_to,eslesme
      FROM islemler ORDER BY tarih, rowid`).all();
   let anchors = [];
-  try { anchors = db.prepare('SELECT kaynak,tarih,hedef_bakiye FROM bakiye_capa').all(); } catch {}
+  try { anchors = db.prepare('SELECT kaynak,tarih,hedef_bakiye,aciklama FROM bakiye_capa').all(); } catch {}
   db.close();
   return { meta, rows, anchors };
 }
@@ -214,7 +214,7 @@ async function main() {
     if (Math.abs(adj) < 1) { if (ex) { await api.deleteTransaction(ex.id); console.log(`  ⚓ ${a.kaynak}: çapa kaldırıldı`); } continue; }
     if (ex) { await api.updateTransaction(ex.id, { amount: adj, date: a.tarih }); console.log(`  ⚓ ${a.kaynak}: çapa güncellendi → ${(adj / 100).toFixed(2)} TL`); }
     else {
-      await api.importTransactions(acctId, [{ date: a.tarih, amount: adj, payee_name: 'Faturalanmamış (uzlaştırma)', notes: 'Varlık/Borç dökümü ile uzlaştırma', cleared: false, imported_id: iid }], {});
+      await api.importTransactions(acctId, [{ date: a.tarih, amount: adj, payee_name: 'Uzlaştırma (çapa)', notes: a.aciklama || 'Bakiye çapası', cleared: false, imported_id: iid }], {});
       console.log(`  ⚓ ${a.kaynak}: çapa eklendi → ${(adj / 100).toFixed(2)} TL`);
     }
   }
