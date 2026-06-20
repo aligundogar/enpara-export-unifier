@@ -1,15 +1,19 @@
-# Enpara Export Unifier
+# tr-bank-to-actual
 
-> Enpara.com'un dağınık hesap/kredi kartı ekstrelerini (PDF + XLS) **tek bir
-> birleşik veri setine** dönüştürür; kategorize eder, tekrar eden ödemeleri ve
-> kart↔hesap mükerrer kayıtlarını bulur, nakit akışını çıkarır.
+> Türk bankalarının dağınık ekstrelerini (Enpara, Garanti… **PDF + XLS**) tek bir
+> birleşik veri setine dönüştürür, kategorize eder, gelir/alacak-verecek/transferleri
+> ayrıştırır — ve **self-hosted [Actual Budget](https://actualbudget.org)'a aktarır**.
 >
-> *Unifies Enpara.com's scattered account & credit-card statements (PDF + XLS)
-> into one consolidated dataset with categorization, recurring-payment & internal-
-> transfer detection, and cash-flow analysis.*
+> *Parses scattered Turkish bank statements (Enpara, Garanti… PDF + XLS) into one
+> consolidated dataset and **imports them into a self-hosted Actual Budget** — with
+> categorization, income/receivable detection, transfer matching, and balance anchoring.*
 
-Çıktı 4 formatta: **CSV**, **çok sayfalı Excel (.xlsx)**, **SQLite (.db)** ve
-okunabilir **Markdown rapor**.
+**İki aşama:**
+1. **Export/parse** → `output/finans.db` (+ CSV / çok-sayfalı Excel / SQLite / Markdown rapor)
+2. **Import** → Actual Budget'a hesaplar, kategoriler, transferler, bütçe (`actual-sync/`)
+
+Çok-bankalı, idempotent (tekrar çalıştırınca çift kayıt yok), kişisel veri koddan
+ayrı (gitignore'lu `rules.local.json`).
 
 ---
 
