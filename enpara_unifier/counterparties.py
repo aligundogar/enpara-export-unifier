@@ -48,6 +48,8 @@ def _load_rules() -> dict:
 _R = _load_rules()
 
 INCOME_RULES = [tuple(x) for x in _R.get("income", [])]          # [(anahtar, kategori)]
+# Sadece GELEN (amount>0) iken gelir sayılanlar (ör. tahsilat platformu = iş geliri)
+INCOME_INCOMING = [tuple(x) for x in _R.get("income_incoming", [])]
 TRANSFER_RULES = [tuple(x) for x in _R.get("transfers", [])]     # [(anahtar, hesap)]
 SELF_PATTERNS = _R.get("holder_patterns", [])                   # kendi adın (öz-transfer)
 OFFBUDGET_ACCOUNTS = {k: tuple(v) for k, v in _R.get("offbudget_accounts", {}).items()}
@@ -59,6 +61,14 @@ OFFBUDGET_ACCOUNTS.setdefault(ACC_DIGER, ("Diğer Kişiler (Borç/Alacak)", "kis
 
 def _is_self(desc_ascii: str) -> bool:
     return any(p in desc_ascii for p in SELF_PATTERNS)
+
+
+def income_incoming(desc_ascii: str) -> str | None:
+    """Yalnızca para GELİRKEN gelir sayılan karşı-taraflar (ör. tahsilat platformu)."""
+    for pat, cat in INCOME_INCOMING:
+        if pat in desc_ascii:
+            return cat
+    return None
 
 
 def party_name(description: str) -> str:

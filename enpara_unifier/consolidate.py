@@ -34,6 +34,12 @@ def _route_txn(t: Transaction, derived: dict) -> None:
         t.internal_transfer = True
         t.category = "Kredi Kartı Ödemesi"
         return
+    # 2a) yalnızca GELİRKEN gelir olanlar (ör. tahsilat platformu = iş geliri)
+    if t.amount > 0:
+        inc = CP.income_incoming(d)
+        if inc:
+            t.category = inc
+            return
     # 2) açık karşı-taraf kuralları (gelir / belirli kişi / yatırım / öz-transfer)
     r = CP.route(d, t.account, t.hareket_tipi)
     if r.get("transfer_to"):
