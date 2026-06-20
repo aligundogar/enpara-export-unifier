@@ -1,4 +1,4 @@
-# tr-bank-to-actual
+# tr-bank-to-actualbudget
 
 > Türk bankalarının dağınık ekstrelerini (Enpara, Garanti… **PDF + XLS**) tek bir
 > birleşik veri setine dönüştürür, kategorize eder, gelir/alacak-verecek/transferleri
