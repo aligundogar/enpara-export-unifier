@@ -14,6 +14,19 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+const HELP = `Sıfırlama (temiz yeniden aktarım öncesi)
+
+  Bu aracın oluşturduğu hesapları (işlemleriyle) ve isteğe bağlı kategori
+  gruplarını Actual'dan siler.
+
+Kullanım:
+  node reset.mjs          sadece hesaplar (işlemleriyle)
+  node reset.mjs --all    kategori gruplarını da sil
+  node reset.mjs --help`;
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(HELP); process.exit(0); }
+
 const ALL = process.argv.includes('--all');
 
 const MY_GROUPS = ['Gelir', 'Gıda & Market', 'Yeme-İçme', 'Faturalar & Abonelikler',

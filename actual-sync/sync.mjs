@@ -20,6 +20,22 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+const HELP = `Çok-bankalı → Actual Budget aktarıcı (API yolu)
+
+  finans.db'yi okur; hesapları/kategorileri oluşturur, işlemleri idempotent
+  aktarır, transferleri eşler, bakiye çapalarını uzlaştırır.
+
+Kullanım:
+  node sync.mjs            DRY-RUN (önizleme, yazmaz)
+  node sync.mjs --apply    Actual sunucusuna canlı yaz
+  node sync.mjs --help     bu yardım
+
+Yapılandırma: actual-sync/config.json ya da ACTUAL_* ortam değişkenleri.
+Dosya-tabanlı (API'siz) alternatif:  node export.mjs`;
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(HELP); process.exit(0); }
+
 const APPLY = process.argv.includes('--apply');
 
 // Gelir kategorileri (is_income grubuna girer). Spesifik gelir adları (ör.

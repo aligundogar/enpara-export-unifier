@@ -18,6 +18,17 @@ import { fileURLToPath } from 'node:url';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
+const HELP = `Bakiye doğrulama
+
+  Actual'daki hesap bakiyelerini finans.db'den beklenen değerlerle karşılaştırır
+  (bakiye çapasını hesaba katarak). Tutmayan hesap varsa çıkış kodu ≠ 0.
+
+Kullanım:
+  node verify.mjs     (npm run verify)
+  node verify.mjs --help`;
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(HELP); process.exit(0); }
+
 function loadConfig() {
   let c = {};
   const cf = resolve(__dir, 'config.json');

@@ -8,7 +8,10 @@
     "dry-run": "node sync.mjs",
     "apply": "node sync.mjs --apply",
     "verify": "node verify.mjs",
-    "reset": "node reset.mjs"
+    "budget": "node budget.mjs",
+    "export": "node export.mjs",
+    "reset": "node reset.mjs",
+    "help": "node help.mjs"
   },
   "dependencies": {
     "@actual-app/api": "^26.6.0"
